@@ -23,9 +23,16 @@ from app.models import Customer, Transaction  # noqa: E402
 from app.services.simulator import Latent  # noqa: E402
 
 
+#: `_env_file=None` is load-bearing. Without it pydantic-settings reads the
+#: developer's real .env, so whether a test passes depends on whose machine it
+#: runs on -- and a suite that consults your credentials is not a suite.
+def isolated_settings(**overrides) -> Settings:
+    return Settings(_env_file=None, **overrides)
+
+
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(
+    return isolated_settings(
         database_url="sqlite://",
         anthropic_api_key=None,
         razorpay_live=False,

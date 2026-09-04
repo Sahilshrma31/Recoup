@@ -5,8 +5,13 @@ pydantic>=2.12
 pydantic-settings>=2.13
 python-dotenv>=1.1
 anthropic>=1.0
+# NVIDIA NIM is OpenAI-compatible, so it is reached with the OpenAI SDK.
+openai>=3.0
 razorpay>=1.4.2
 
 # --- dev ---
 pytest>=8.4
 pytest-asyncio>=1.0
+
+# --- read-only MCP surface (optional; see README) ---
+mcp>=2.1

@@ -52,6 +52,9 @@ export default function TransactionDetail() {
   const chosen = scores.find((s) => s.action === decision?.action)
   const awaitingApproval = txn.recovery_state === 'AWAITING_APPROVAL'
   const closed = txn.recovery_state === 'RECOVERED'
+  // An action is already in motion. Offering "Recover" here would ask the agent
+  // to authorise a second one against money that is already moving.
+  const inFlight = txn.recovery_state === 'EXECUTING'
 
   return (
     <>
@@ -68,7 +71,12 @@ export default function TransactionDetail() {
         </div>
         <div className="controls" style={{ margin: 0 }}>
           <StateBadge state={txn.recovery_state} />
-          {!closed && (
+          {inFlight && (
+            <span className="cell-sub" style={{ alignSelf: 'center' }}>
+              Action in flight — waiting for it to resolve
+            </span>
+          )}
+          {!closed && !inFlight && (
             <>
               <button className="btn" disabled={!!busy} onClick={() => act('analyze', () => api.analyze(txn.id))}>
                 {busy === 'analyze' ? <span className="spinner" /> : null} Re-analyse

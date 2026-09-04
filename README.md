@@ -74,6 +74,9 @@ cd backend && .venv/bin/python -m scripts.experiment --limit 2500
 
 # 4. Tests
 cd backend && .venv/bin/python -m pytest tests/ -q
+
+# 5. Read-only MCP server for merchant ops (optional)
+cd backend && .venv/bin/python -m app.mcp_server
 ```
 
 ### Optional configuration
@@ -82,7 +85,8 @@ Copy `.env.example` to `.env`. Everything is optional:
 
 | Variable | Effect when unset |
 |---|---|
-| `ANTHROPIC_API_KEY` | Agent runs on the deterministic diagnosis engine |
+| `LLM_PROVIDER` | Defaults to `anthropic`; set `nvidia` to use NVIDIA NIM |
+| `NVIDIA_API_KEY` / `ANTHROPIC_API_KEY` | Agent runs on the deterministic diagnosis engine |
 | `RAZORPAY_KEY_ID` / `_SECRET` | Executes against an in-memory mock gateway |
 | `RAZORPAY_WEBHOOK_SECRET` | **Signature verification is skipped** — see Security |
 | `DATABASE_URL` | SQLite at `backend/data/recovery.db` |
@@ -174,6 +178,81 @@ Recorded as a policy override, visible in the UI and counted on the dashboard.
 
 ---
 
+## Choosing the NVIDIA model
+
+The reasoning layer runs on either **NVIDIA NIM** or **Anthropic**, selected by `LLM_PROVIDER`. The default is `nvidia/nemotron-3-super-120b-a12b`, and it was picked by measurement rather than reputation.
+
+Two things had to be true, in this order:
+
+1. **It must hold the schema.** The agent discards anything that fails `AgentAnalysis` validation, so a model that reasons brilliantly but wraps its JSON in prose is worth less here than a duller one that emits clean output every time.
+2. **It must get the ambiguous case right.** The benchmark case is the one the LLM layer exists for: `do_not_honour` — a code that looks like a customer decline — on a customer with 14 successful payments, during a 4.1× UPI failure spike. The correct read is `A_TEMPORARY_TECHNICAL`, not `B_CUSTOMER_PAYMENT_ISSUE`. The deterministic engine hedges here; the model should not.
+
+Then latency, because this runs per transaction.
+
+| Model | Schema | Verdict | Latency |
+|---|---|---|---:|
+| **`nvidia/nemotron-3-super-120b-a12b`** | **strict `json_schema`** | **correct** | **6.4 s** |
+| `openai/gpt-oss-20b` | strict `json_schema` | correct | 70.9 s |
+| `nvidia/nemotron-3.5-lightning-30b-a3b` | — | timed out (30 s) | — |
+| `moonshotai/kimi-k3` | — | timed out (30 s) | — |
+
+Both models that answered got it right. The 120B MoE is **11× faster** than the alternative, and at ~12B active parameters it is cheaper per call than its size suggests. Reproduce with `scripts/bench_models.py`.
+
+Two consequences of not being on Anthropic, stated plainly:
+
+- **Schema compliance is negotiated, not guaranteed.** `messages.parse` validates server-side; NVIDIA's `response_format` support varies per model. `NvidiaProvider` tries strict `json_schema`, steps down to `json_object`, then to prompt-only, and remembers whichever worked. Output is parsed defensively — code fences, `<think>` blocks and trailing prose are all stripped, and braces inside strings do not end the object.
+- **No prompt caching and no adaptive thinking.** The system prompt is re-sent on every call. `AI_EFFORT` applies to Anthropic only.
+
+`temperature` is pinned to `0`: this is a classification and a decision, so the same transaction must produce the same call twice, and a merchant asking "why?" deserves a stable answer.
+
+None of this reaches the rest of the agent. Both providers return the same validated object, and both fail the same way — into the deterministic engine.
+
+---
+
+## Razorpay integration: SDK to act, MCP to ask
+
+Recoup uses **both**, for deliberately different jobs.
+
+### The official SDK moves the money
+
+[`razorpay_client/live.py`](backend/app/razorpay_client/live.py) uses the official Python SDK — `razorpay.Client`, `order.create`, `payment_link.create`, `payment_link.notify_by`, `payment.fetch` — with the SDK's typed errors (`BadRequestError` / `GatewayError` / `ServerError`) mapped to retryable vs. non-retryable so the backoff policy is correct. Webhook signatures go through the SDK's own `verify_webhook_signature` rather than a hand-rolled HMAC.
+
+### Recoup's MCP server answers questions — and only questions
+
+Razorpay ships an MCP server so a model can *call* payment tools. Recoup deliberately does not give a model that ability, so it is not used in the execution path. That is the entire architectural claim: the model reasons, deterministic code acts. Putting an agent's tool loop between the policy engine and the gateway would hand back exactly the capability the design took away — the idempotency key, the retry budget and the approval gate all live in that gap.
+
+So MCP is used for the other half of the problem: **a human asking questions.** [`app/mcp_server.py`](backend/app/mcp_server.py) exposes five tools, every one of them a `SELECT`:
+
+| Tool | Answers |
+|---|---|
+| `get_transaction` | "What happened to `pay_92831`?" |
+| `explain_decision` | "Why did it choose a payment link?" — scorecard, alternatives, all ten guardrail results |
+| `recovery_metrics` | "How much did we recover this week?" |
+| `list_at_risk` | "What are the biggest open items awaiting a link?" |
+| `failure_breakdown` | "What's failing, and on which rail?" |
+
+There is no `recover`, no `retry`, no `approve`. Acting stays behind the API's policy engine and its audit trail, and a test asserts that those tool names never appear here. Every tool is advertised with `read_only_hint: true`, and customer contact details are excluded from the payloads.
+
+```bash
+python -m app.mcp_server        # stdio
+```
+
+Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "recoup": {
+      "command": "/absolute/path/to/backend/.venv/bin/python",
+      "args": ["-m", "app.mcp_server"],
+      "cwd": "/absolute/path/to/backend"
+    }
+  }
+}
+```
+
+---
+
 ## Safety properties
 
 - **Bounded action space.** Six actions, not arbitrary API access.
@@ -209,13 +288,14 @@ The two recovery-time figures are separate on purpose. The agent-attributable on
 ```
 backend/
   app/
-    agent/       features · diagnosis · predictor · planner · prompts · llm · orchestrator
+    agent/       features · diagnosis · predictor · planner · prompts · llm · providers · orchestrator
     policy/      rules · guardrails          ← can veto the AI
     razorpay_client/  base · live · mock · factory · webhooks
     services/    executor · verification · state_machine · simulator · runtime · analytics · activity
     api/         transactions · recovery · analytics · decisions · webhooks · stream · demo
+    mcp_server.py     read-only MCP tools for merchant ops
   scripts/       seed.py · experiment.py
-  tests/         45 tests, concentrated on the guardrails
+  tests/         72 tests, concentrated on the guardrails and the MCP boundary
 frontend/
   src/pages/     Overview · Transactions · TransactionDetail · Experiment
   src/components/ Primitives · ActivityFeed (SSE)
@@ -230,8 +310,9 @@ Being precise about this matters more than the demo looking impressive.
 | Component | Status |
 |---|---|
 | Diagnosis, scoring, planning, policy engine, state machine, idempotency, audit trail | **Real** — same code in every mode |
-| Webhook ingestion + signature verification | **Real** |
-| Payment link creation, order/payment fetch | **Real** against Razorpay test keys; mocked otherwise |
+| Webhook ingestion + SDK signature verification | **Real** |
+| Payment link creation, order/payment fetch (official SDK) | **Real** against Razorpay test keys; mocked otherwise |
+| Read-only MCP server | **Real** — queries the same tables the dashboard reads |
 | Recovery outcomes | **Simulated** unless `RAZORPAY_LIVE=true`, where they come from polling real order status |
 | Customer messaging (SMS/WhatsApp/email) | **Not built** — a reminder is logged and, in live mode, uses Razorpay's link notification |
 | A/B numbers | **Simulated**, per the caveats above |

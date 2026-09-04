@@ -177,6 +177,16 @@ class ActionExecutor:
         # sitting in DETECTED, and skipping states would break the audit trail.
         advance_to(txn, RecoveryState.EXECUTING)
 
+        # Commit the "about to call the provider" state before calling it.
+        #
+        # Two reasons, and the second is the important one. It releases the
+        # SQLite write lock so a slow gateway (or its backoff chain) cannot
+        # starve the worker. And it makes the attempt durable *before* money
+        # can move: if this process dies mid-call, the attempt row already
+        # exists with its idempotency key, so recovery sees an in-flight
+        # attempt instead of silently losing that it ever happened.
+        db.commit()
+
         try:
             result, provider_attempts = await call_with_backoff(
                 lambda: self._gateway_call(txn, attempt)

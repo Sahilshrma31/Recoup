@@ -11,6 +11,14 @@ from app.services.executor import ActionExecutor, idempotency_key
 from app.services.state_machine import InvalidTransition, transition
 
 
+def _agent(settings):
+    """A bare RecoveryAgent -- no runtime, so no background workers start."""
+    from app.agent.llm import ReasoningClient
+    from app.agent.orchestrator import RecoveryAgent
+
+    return RecoveryAgent(settings, ReasoningClient(settings))
+
+
 def _decision(txn, action=Action.CREATE_PAYMENT_LINK, delay=0):
     return AgentDecision(
         transaction_id=txn.id, diagnosis="test_cause", category="B_CUSTOMER_PAYMENT_ISSUE",
@@ -160,3 +168,51 @@ class TestStateMachine:
 
         assert attempt is None
         assert txn.recovery_state == RecoveryState.STOPPED
+
+
+class TestConcurrentRecoveryIsRefused:
+    """Clicking Recover on a transaction that is already acting must not 500.
+
+    The tempting fix -- walking EXECUTING -> ATTEMPT_FAILED -> ANALYZING to get
+    back to a plannable state -- would write an attempt failure that never
+    happened. Refusing is correct.
+    """
+
+    @pytest.mark.asyncio
+    async def test_executing_transaction_refuses_a_second_plan(
+        self, db, settings, make_transaction
+    ):
+        from app.agent.orchestrator import ActionInFlight
+
+        txn = make_transaction()
+        transition(txn, RecoveryState.ANALYZING)
+        transition(txn, RecoveryState.PLANNED)
+        transition(txn, RecoveryState.EXECUTING)
+
+        with pytest.raises(ActionInFlight):
+            await _agent(settings).analyse(db, txn)
+
+    @pytest.mark.asyncio
+    async def test_recovered_transaction_has_nothing_left_to_decide(
+        self, db, settings, make_transaction
+    ):
+        from app.agent.orchestrator import AlreadyResolved
+
+        txn = make_transaction()
+        for state in (RecoveryState.ANALYZING, RecoveryState.PLANNED,
+                      RecoveryState.EXECUTING, RecoveryState.RECOVERED):
+            transition(txn, state)
+
+        with pytest.raises(AlreadyResolved):
+            await _agent(settings).analyse(db, txn)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_attempt_can_be_replanned(self, db, settings, make_transaction):
+        """The opposite case: after an attempt fails, re-planning is the point."""
+        txn = make_transaction()
+        for state in (RecoveryState.ANALYZING, RecoveryState.PLANNED,
+                      RecoveryState.EXECUTING, RecoveryState.ATTEMPT_FAILED):
+            transition(txn, state)
+
+        result = await _agent(settings).analyse(db, txn, use_llm=False)
+        assert result.decision is not None

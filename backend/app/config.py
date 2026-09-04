@@ -6,6 +6,7 @@ financial arithmetic in this codebase ever touches a float.
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -20,9 +21,21 @@ class Settings(BaseSettings):
     api_prefix: str = "/api"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
-    # --- Anthropic (AI reasoning layer) ---
+    # --- AI reasoning layer ---
+    # Two providers are supported. The agent's behaviour is identical either
+    # way: the model proposes, the policy engine disposes, and any failure
+    # falls through to the deterministic engine.
+    llm_provider: Literal["anthropic", "nvidia"] = "anthropic"
+
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-opus-5"
+
+    # NVIDIA NIM serves an OpenAI-compatible API, so it is reached with the
+    # OpenAI SDK pointed at their base URL rather than a bespoke client.
+    nvidia_api_key: str | None = None
+    nvidia_model: str = "nvidia/nemotron-3-super-120b-a12b"
+    nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
+
     ai_enabled: bool = True
     ai_timeout_seconds: float = 45.0
     ai_max_tokens: int = 4096
@@ -78,8 +91,16 @@ class Settings(BaseSettings):
         return self.razorpay_live and self.razorpay_configured
 
     @property
+    def llm_api_key(self) -> str | None:
+        return self.nvidia_api_key if self.llm_provider == "nvidia" else self.anthropic_api_key
+
+    @property
+    def llm_model(self) -> str:
+        return self.nvidia_model if self.llm_provider == "nvidia" else self.anthropic_model
+
+    @property
     def llm_configured(self) -> bool:
-        return bool(self.ai_enabled and self.anthropic_api_key)
+        return bool(self.ai_enabled and self.llm_api_key)
 
 
 @lru_cache

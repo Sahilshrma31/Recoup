@@ -12,6 +12,7 @@ from ..enums import RecoveryState, TxnStatus
 from ..models import AgentDecision, Customer, Transaction
 from ..schemas import TransactionDetail, TransactionSummary
 from ..services import activity
+from ..agent.orchestrator import ActionInFlight, AlreadyResolved
 from ..services.runtime import get_runtime
 from .deps import detail, latest_decision, summarise
 
@@ -101,7 +102,10 @@ async def analyze_transaction(transaction_id: str, db: Session = Depends(get_db)
     if txn is None:
         raise HTTPException(404, f"Unknown transaction {transaction_id}")
     runtime = get_runtime()
-    await runtime.agent.analyse(db, txn)
+    try:
+        await runtime.agent.analyse(db, txn)
+    except (ActionInFlight, AlreadyResolved) as exc:
+        raise HTTPException(409, str(exc)) from exc
     db.commit()
     db.refresh(txn)
     return detail(txn, activity.recent(db, limit=50, transaction_id=transaction_id))

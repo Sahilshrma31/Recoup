@@ -9,6 +9,7 @@ from ..enums import Action, RecoveryState
 from ..models import Transaction
 from ..schemas import ActionResponse
 from ..services import activity
+from ..agent.orchestrator import ActionInFlight, AlreadyResolved
 from ..services.runtime import get_runtime
 from ..services.state_machine import transition
 from .deps import latest_decision
@@ -26,7 +27,12 @@ async def recover(transaction_id: str, db: Session = Depends(get_db)):
         raise HTTPException(409, "Transaction has already been recovered.")
 
     runtime = get_runtime()
-    result = await runtime.agent.analyse(db, txn)
+    try:
+        result = await runtime.agent.analyse(db, txn)
+    except ActionInFlight as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except AlreadyResolved as exc:
+        raise HTTPException(409, str(exc)) from exc
     attempt = None
     if RecoveryState(txn.recovery_state) is not RecoveryState.AWAITING_APPROVAL:
         attempt = await runtime.executor.execute(db, txn, result.decision)
@@ -57,7 +63,12 @@ async def approve(transaction_id: str, db: Session = Depends(get_db)):
         message=f"Merchant approved the recovery action for Rs {txn.amount_paise / 100:,.0f}.",
     )
     # Re-plan under approval so the decision on record is the one that ran.
-    result = await runtime.agent.analyse(db, txn, merchant_approved=True)
+    try:
+        result = await runtime.agent.analyse(db, txn, merchant_approved=True)
+    except ActionInFlight as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except AlreadyResolved as exc:
+        raise HTTPException(409, str(exc)) from exc
     attempt = await runtime.executor.execute(db, txn, result.decision)
     db.commit()
     return ActionResponse(

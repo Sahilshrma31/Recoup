@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI):
     log.info(
         "Recovery agent ready | gateway=%s live=%s ai=%s model=%s",
         runtime.gateway.name, settings.live_execution,
-        settings.llm_configured, settings.anthropic_model,
+        settings.llm_configured, settings.llm_model,
     )
     try:
         yield
@@ -82,7 +82,8 @@ def health():
         "razorpay_configured": settings.razorpay_configured,
         "webhook_signature_verification": bool(settings.razorpay_webhook_secret),
         "ai_configured": settings.llm_configured,
-        "model": settings.anthropic_model if settings.llm_configured else None,
+        "model": settings.llm_model if settings.llm_configured else None,
+        "llm_provider": settings.llm_provider if settings.llm_configured else None,
         "policy": {
             "auto_action_limit_rupees": settings.auto_action_limit_paise / 100,
             "max_auto_retries": settings.max_auto_retries,

@@ -23,7 +23,7 @@ from ..config import Settings
 from ..db import session_scope
 from ..enums import Action, AttemptStatus, RecoveryState, TxnStatus
 from ..agent.llm import ReasoningClient
-from ..agent.orchestrator import RecoveryAgent
+from ..agent.orchestrator import ActionInFlight, AlreadyResolved, RecoveryAgent
 from ..models import RecoveryAttempt, Transaction, utcnow
 from ..razorpay_client.base import PaymentGateway
 from ..razorpay_client.factory import build_gateway
@@ -99,7 +99,13 @@ class AgentRuntime:
 
     async def process(self, db: Session, txn: Transaction, *, merchant_approved: bool = False) -> None:
         """One full Detect -> ... -> Act pass over a single transaction."""
-        result = await self.agent.analyse(db, txn, merchant_approved=merchant_approved)
+        try:
+            result = await self.agent.analyse(db, txn, merchant_approved=merchant_approved)
+        except (ActionInFlight, AlreadyResolved) as exc:
+            # Normal in a queue: a webhook can arrive for a transaction the
+            # scheduler is already acting on. Skip it rather than kill the worker.
+            log.debug("skipping %s: %s", txn.id, exc)
+            return None
         if RecoveryState(txn.recovery_state) is RecoveryState.AWAITING_APPROVAL:
             return  # a human decides from here
         await self.executor.execute(db, txn, result.decision)

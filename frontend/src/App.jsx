@@ -6,6 +6,13 @@ import TransactionDetail from './pages/TransactionDetail.jsx'
 import Experiment from './pages/Experiment.jsx'
 import { api } from './lib/api.js'
 
+/** Model ids are vendor-prefixed and too long for the rail; the vendor is
+ *  already shown beside it, so display just the model name. */
+function modelLabel(model) {
+  if (!model) return 'Rules only'
+  return model.includes('/') ? model.split('/').pop() : model
+}
+
 export default function App() {
   const [health, setHealth] = useState(null)
 
@@ -42,7 +49,8 @@ export default function App() {
           <div className="mode-chip">
             Execution: <b>{live ? 'Live Razorpay' : 'Simulated'}</b>
             <br />
-            Reasoning: <b>{health?.ai_configured ? health.model : 'Rules only'}</b>
+            Reasoning: <b>{health?.ai_configured ? modelLabel(health.model) : 'Rules only'}</b>
+            {health?.llm_provider && <> via {health.llm_provider}</>}
             <br />
             Auto-action cap: <b>₹{(health?.policy?.auto_action_limit_rupees ?? 0).toLocaleString('en-IN')}</b>
           </div>

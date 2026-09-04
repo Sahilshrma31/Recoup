@@ -44,6 +44,20 @@ def _minutes_since_last_attempt(txn: Transaction) -> float | None:
     return (datetime.now(timezone.utc) - last).total_seconds() / 60.0
 
 
+class ActionInFlight(RuntimeError):
+    """An action is already executing for this transaction.
+
+    Re-planning here would either corrupt the audit trail (walking
+    EXECUTING -> ATTEMPT_FAILED to get back to ANALYZING records a failure that
+    never happened) or authorise a second action against money that is already
+    in motion. Refusing is the correct answer; the caller surfaces it as 409.
+    """
+
+
+class AlreadyResolved(RuntimeError):
+    """The transaction is recovered. There is nothing left to decide."""
+
+
 class RecoveryAgent:
     def __init__(
         self,
@@ -67,8 +81,18 @@ class RecoveryAgent:
     ) -> AnalysisResult:
         ctx = ctx or build_merchant_context(db)
 
-        if RecoveryState(txn.recovery_state) in (RecoveryState.DETECTED, RecoveryState.ATTEMPT_FAILED,
-                                                 RecoveryState.STOPPED):
+        state = RecoveryState(txn.recovery_state)
+        if state is RecoveryState.RECOVERED:
+            raise AlreadyResolved(f"{txn.id} has already been recovered.")
+        if state is RecoveryState.EXECUTING:
+            raise ActionInFlight(
+                f"{txn.id} already has a recovery action in flight; "
+                "wait for it to resolve before planning another."
+            )
+        # DETECTED / ATTEMPT_FAILED / STOPPED need a step to reach ANALYZING.
+        # PLANNED, AWAITING_APPROVAL and ANALYZING can already reach a plan, so
+        # re-analysing them is allowed and simply supersedes the last decision.
+        if state in (RecoveryState.DETECTED, RecoveryState.ATTEMPT_FAILED, RecoveryState.STOPPED):
             transition(txn, RecoveryState.ANALYZING)
 
         # --- 1. features -------------------------------------------------
@@ -110,6 +134,19 @@ class RecoveryAgent:
         # --- 4. AI reasoning (advisory) ----------------------------------
         analysis, llm_meta = None, None
         if use_llm and self.reasoning.available:
+            # Release the write lock before going to the network.
+            #
+            # Everything above wrote rows -- the state transition and three
+            # activity events -- which on SQLite holds a write transaction open.
+            # The model call that follows takes seconds, and holding a database
+            # lock across it starves the worker and the scheduler until one of
+            # them trips the busy timeout and the request 500s.
+            #
+            # Committing here is not merely a workaround: the events above
+            # describe work that has genuinely happened, and the activity feed
+            # is supposed to show them *while* the agent is still thinking.
+            db.commit()
+
             try:
                 result = await self.reasoning.analyse(
                     features=features,

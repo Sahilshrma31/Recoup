@@ -1,6 +1,8 @@
 """Diagnosis quality, scoring sanity, and the data boundary around the model."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app.agent.diagnosis import diagnose
@@ -123,3 +125,99 @@ class TestModelDataBoundary:
     def test_allowlist_is_closed_by_default(self):
         """A new column on the model cannot silently start leaking."""
         assert sanitise_for_llm({"some_future_field": "sensitive"}) == {}
+
+
+class TestReasoningFailureContainment:
+    """Every model failure must degrade to the deterministic path, not crash."""
+
+    def test_billing_exhaustion_is_named_clearly(self):
+        """A 400 for credits must not be reported as a malformed request."""
+        import anthropic
+        import httpx2
+
+        from app.agent.providers import AnthropicProvider, ProviderError
+        from conftest import isolated_settings
+
+        provider = AnthropicProvider(
+            isolated_settings(llm_provider="anthropic", anthropic_api_key="sk-test")
+        )
+
+        request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+        response = httpx2.Response(400, request=request, json={
+            "type": "error",
+            "error": {"type": "invalid_request_error",
+                      "message": "Your credit balance is too low to access the Anthropic API."},
+        })
+
+        async def boom(**_kwargs):
+            raise anthropic.BadRequestError(
+                "Your credit balance is too low to access the Anthropic API.",
+                response=response, body=None,
+            )
+
+        provider._client.messages.parse = boom  # type: ignore[method-assign]
+
+        with pytest.raises(ProviderError) as caught:
+            asyncio.run(provider.analyse(system="s", user="u"))
+        assert "credit balance is exhausted" in str(caught.value)
+        assert "malformed" not in str(caught.value).lower()
+        assert caught.value.permanent is True, "a billing fault must not trip the breaker"
+
+    def test_unconfigured_client_is_unavailable_not_broken(self):
+        from app.agent.llm import ReasoningClient
+        from conftest import isolated_settings
+
+        client = ReasoningClient(isolated_settings(anthropic_api_key=None, nvidia_api_key=None))
+        assert client.available is False
+        assert client.status()["configured"] is False
+
+    def test_provider_selection_follows_config(self):
+        from app.agent.providers import AnthropicProvider, NvidiaProvider, build_provider
+        from conftest import isolated_settings
+
+        anthropic_provider = build_provider(
+            isolated_settings(llm_provider="anthropic", anthropic_api_key="sk-test")
+        )
+        nvidia_provider = build_provider(
+            isolated_settings(llm_provider="nvidia", nvidia_api_key="nvapi-test")
+        )
+        assert isinstance(anthropic_provider, AnthropicProvider)
+        assert isinstance(nvidia_provider, NvidiaProvider)
+        assert build_provider(isolated_settings(anthropic_api_key=None, nvidia_api_key=None)) is None
+
+    def test_nvidia_key_alone_does_not_enable_anthropic(self):
+        """A key for one provider must never be used against the other."""
+        from conftest import isolated_settings
+
+        settings = isolated_settings(llm_provider="anthropic", nvidia_api_key="nvapi-test")
+        assert settings.llm_configured is False
+
+
+class TestChattyModelOutput:
+    """Models without enforced schemas explain themselves. Parse around it."""
+
+    @pytest.mark.parametrize("raw", [
+        '{"a": 1}',
+        '```json\n{"a": 1}\n```',
+        'Here is my analysis:\n```\n{"a": 1}\n```\nHope this helps.',
+        '<think>weighing the evidence</think>{"a": 1}',
+        'Sure! {"a": 1} — let me know if you need more.',
+    ])
+    def test_json_is_recovered_from_prose(self, raw):
+        from app.agent.providers import extract_json
+
+        assert extract_json(raw) == {"a": 1}
+
+    def test_braces_inside_strings_do_not_end_the_object(self):
+        from app.agent.providers import extract_json
+
+        assert extract_json('{"reason": "spike of 4.1} on UPI"}') == {
+            "reason": "spike of 4.1} on UPI"
+        }
+
+    @pytest.mark.parametrize("raw", ["", "no json at all", "{unterminated"])
+    def test_unusable_output_raises(self, raw):
+        from app.agent.providers import ProviderError, extract_json
+
+        with pytest.raises(ProviderError):
+            extract_json(raw)
