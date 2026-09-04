@@ -25,7 +25,7 @@ export default function App() {
         <div className="brand">
           <span className="brand-mark">
             <span className={`brand-dot${running ? '' : ' idle'}`} />
-            Recovery Agent
+            Recoup
           </span>
           <span className="brand-sub">Razorpay revenue recovery</span>
         </div>

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
+from datetime import timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -23,9 +24,13 @@ _recent: deque[dict] = deque(maxlen=100)
 
 
 def _serialise(event: ActivityEvent) -> dict:
+    # Stamp UTC: a naive ISO string is read as local time by the browser.
+    ts = event.created_at
+    if ts is not None and ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
     return {
         "id": event.id,
-        "ts": (event.created_at.isoformat() if event.created_at else None),
+        "ts": (ts.isoformat() if ts else None),
         "transaction_id": event.transaction_id,
         "stage": event.stage,
         "level": event.level,

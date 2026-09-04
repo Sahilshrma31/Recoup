@@ -20,7 +20,7 @@ from ..models import RecoveryAttempt, Transaction, utcnow
 from ..razorpay_client.base import GatewayError, PaymentGateway
 from . import activity, simulator
 from .simulator import Latent
-from .state_machine import transition
+from .state_machine import advance_to, transition
 
 log = logging.getLogger(__name__)
 
@@ -131,9 +131,7 @@ class VerificationService:
         txn.recovered_amount_paise = txn.amount_paise
         txn.status = "captured"
         txn.at_risk = False
-        if txn.recovery_state != RecoveryState.EXECUTING:
-            txn.recovery_state = str(RecoveryState.EXECUTING)
-        transition(txn, RecoveryState.RECOVERED)
+        advance_to(txn, RecoveryState.RECOVERED)
 
         customer = txn.customer
         customer.successful_payments += 1
@@ -141,13 +139,31 @@ class VerificationService:
         customer.last_payment_at = txn.recovered_at
 
         failed_at = _aware(txn.failed_at) or _aware(txn.created_at) or utcnow()
-        minutes = (txn.recovered_at - failed_at).total_seconds() / 60.0
+        # How stale the money was: real elapsed time, uncompressed.
+        age_minutes = (txn.recovered_at - failed_at).total_seconds() / 60.0
+
+        # How long the agent took once it acted: converted back to the simulated
+        # clock, so "45 minutes for a customer to open a link" reports as 45
+        # minutes and not as the 45 seconds the demo actually spent.
+        first_action = min(
+            (a.executed_at for a in txn.attempts if a.executed_at), default=attempt.executed_at
+        )
+        first_action = _aware(first_action) or txn.recovered_at
+        elapsed_seconds = max(0.0, (txn.recovered_at - first_action).total_seconds())
+        txn.agent_recovery_minutes = round(
+            elapsed_seconds
+            if self.settings.live_execution
+            else elapsed_seconds / max(self.settings.simulated_minute_seconds, 1e-9),
+            2,
+        )
+
         activity.emit(
             db, transaction_id=txn.id, stage="verify", level="success",
             message=f"Rs {txn.amount_paise / 100:,.0f} RECOVERED via {attempt.action} "
-                    f"in {minutes:.0f} min.",
+                    f"in {txn.agent_recovery_minutes:.0f} min.",
             detail={"attempt_id": attempt.id, "amount_paise": txn.amount_paise,
-                    "recovery_minutes": round(minutes, 1)},
+                    "agent_recovery_minutes": txn.agent_recovery_minutes,
+                    "failure_age_minutes": round(age_minutes, 1)},
         )
         return True
 

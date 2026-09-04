@@ -1,4 +1,7 @@
-"""Razorpay Revenue Recovery Agent -- API entrypoint."""
+"""Recoup -- API entrypoint.
+
+An autonomous revenue recovery agent for Razorpay merchants.
+"""
 from __future__ import annotations
 
 import logging
@@ -15,7 +18,7 @@ from .services.runtime import AgentRuntime, set_runtime
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 )
-log = logging.getLogger("recovery")
+log = logging.getLogger("recoup")
 
 
 @asynccontextmanager
@@ -38,7 +41,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Razorpay Revenue Recovery Agent",
+    title="Recoup — Razorpay Revenue Recovery Agent",
     version="1.0.0",
     description=(
         "An autonomous agent that diagnoses failed payments, predicts recovery "

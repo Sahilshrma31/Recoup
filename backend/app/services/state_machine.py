@@ -7,6 +7,7 @@ or re-planning one the agent deliberately stopped.
 from __future__ import annotations
 
 import logging
+from collections import deque
 
 from ..enums import STATE_TRANSITIONS, RecoveryState
 from ..models import Transaction
@@ -41,4 +42,39 @@ def transition(txn: Transaction, to: RecoveryState, *, reason: str | None = None
     elif to is RecoveryState.RECOVERED:
         txn.at_risk = False
     log.debug("%s: %s -> %s", txn.id, frm, to)
+    return to
+
+
+def path_to(frm: RecoveryState, to: RecoveryState) -> list[RecoveryState] | None:
+    """Shortest legal sequence of states from `frm` to `to`, or None."""
+    if frm is to:
+        return []
+    queue: deque[tuple[RecoveryState, list[RecoveryState]]] = deque([(frm, [])])
+    seen = {frm}
+    while queue:
+        state, route = queue.popleft()
+        for nxt in STATE_TRANSITIONS.get(state, frozenset()):
+            if nxt in seen:
+                continue
+            step = route + [nxt]
+            if nxt is to:
+                return step
+            seen.add(nxt)
+            queue.append((nxt, step))
+    return None
+
+
+def advance_to(txn: Transaction, to: RecoveryState, *, reason: str | None = None) -> RecoveryState:
+    """Move to `to` through the intermediate states the machine requires.
+
+    Callers that legitimately need a transaction to end up in a given state
+    should not have to know the route. Jumping straight there would either
+    raise or, worse, silently skip a state the audit trail depends on -- so
+    this walks the shortest legal path instead.
+    """
+    route = path_to(current_state(txn), to)
+    if route is None:
+        raise InvalidTransition(txn.id, current_state(txn), to)
+    for step in route:
+        transition(txn, step, reason=reason if step is to else None)
     return to

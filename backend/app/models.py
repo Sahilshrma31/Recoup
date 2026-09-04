@@ -81,6 +81,10 @@ class Transaction(Base, TimestampMixin):
     failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     recovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     recovered_amount_paise: Mapped[int] = mapped_column(Integer, default=0)
+    #: Minutes from the agent's first action to the money arriving, on the
+    #: *simulated* clock. Recorded at verification time because the demo
+    #: compresses wall-clock time; deriving it later would report seconds.
+    agent_recovery_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # --- recovery workflow state ---
     recovery_state: Mapped[str] = mapped_column(String(24), default=RecoveryState.DETECTED, index=True)

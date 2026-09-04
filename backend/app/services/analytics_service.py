@@ -168,30 +168,31 @@ def performance(db: Session) -> dict:
     ).one()
 
     # Two recovery-time numbers, because they answer different questions.
-    # `avg_recovery_minutes` is failure -> money (design §27), which on a seeded
-    # backlog is dominated by how long the transaction sat there before anyone
-    # looked at it. `avg_agent_recovery_minutes` is first-action -> money, which
-    # is the part the agent is actually responsible for.
+    #
+    # `avg_recovery_minutes` is failure -> money (design §27). On a seeded
+    # backlog it is dominated by how long the transaction sat there before
+    # anyone looked at it, which is real and worth seeing.
+    #
+    # `avg_agent_recovery_minutes` is first-action -> money: the part the agent
+    # is actually responsible for. It is read from the column recorded at
+    # verification time rather than re-derived here, because the demo runs on a
+    # compressed clock and a wall-clock subtraction would report seconds.
     recovered = db.execute(
         select(
             Transaction.failed_at,
             Transaction.created_at,
             Transaction.recovered_at,
-            func.min(RecoveryAttempt.executed_at).label("first_action_at"),
-        )
-        .outerjoin(RecoveryAttempt, RecoveryAttempt.transaction_id == Transaction.id)
-        .where(Transaction.recovered_at.is_not(None))
-        .group_by(Transaction.id)
+            Transaction.agent_recovery_minutes,
+        ).where(Transaction.recovered_at.is_not(None))
     ).all()
     durations, agent_durations = [], []
-    for failed_at, created_at, recovered_at, first_action_at in recovered:
+    for failed_at, created_at, recovered_at, agent_minutes in recovered:
         start = _aware(failed_at) or _aware(created_at)
         end = _aware(recovered_at)
         if start and end and end >= start:
             durations.append((end - start).total_seconds() / 60.0)
-        acted = _aware(first_action_at)
-        if acted and end and end >= acted:
-            agent_durations.append((end - acted).total_seconds() / 60.0)
+        if agent_minutes is not None:
+            agent_durations.append(float(agent_minutes))
 
     manual = db.execute(
         select(func.count()).select_from(Transaction).where(

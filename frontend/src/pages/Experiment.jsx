@@ -37,9 +37,17 @@ function Row({ metric, baseline, agent }) {
   const changed = Math.abs(a - b) > 1e-9
   let deltaText = '—'
   if (changed) {
-    if (metric.kind === 'pct') deltaText = `${((a - b) * 100 >= 0 ? '+' : '')}${((a - b) * 100).toFixed(1)} pp`
-    else if (metric.kind === 'money') deltaText = `${b ? ((a / b - 1) * 100 >= 0 ? '+' : '') + ((a / b - 1) * 100).toFixed(0) + '%' : '—'}`
-    else deltaText = `${a - b >= 0 ? '+' : ''}${(a - b).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`
+    const sign = a - b >= 0 ? '+' : ''
+    if (metric.kind === 'pct') {
+      deltaText = `${sign}${((a - b) * 100).toFixed(1)} pp`
+    } else if (metric.kind === 'money') {
+      deltaText = b ? `${a / b - 1 >= 0 ? '+' : ''}${((a / b - 1) * 100).toFixed(0)}%` : '—'
+    } else if (metric.kind === 'minutes') {
+      // Relative change reads better than a raw minute delta on a duration.
+      deltaText = b ? `${a / b - 1 >= 0 ? '+' : ''}${((a / b - 1) * 100).toFixed(0)}%` : '—'
+    } else {
+      deltaText = `${sign}${(a - b).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`
+    }
   }
 
   return (

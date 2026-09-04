@@ -33,7 +33,7 @@ from ..models import AgentDecision, RecoveryAttempt, Transaction, utcnow
 from ..razorpay_client.base import GatewayError, PaymentGateway
 from ..razorpay_client.factory import call_with_backoff
 from . import activity, simulator
-from .state_machine import transition
+from .state_machine import advance_to, transition
 
 log = logging.getLogger(__name__)
 
@@ -49,8 +49,25 @@ def _existing_attempt(db: Session, key: str) -> RecoveryAttempt | None:
     ).scalar_one_or_none()
 
 
+def _attempt_for_decision(db: Session, decision_id: int | None) -> RecoveryAttempt | None:
+    """The attempt already created for this decision, if any."""
+    if decision_id is None:
+        return None
+    return db.execute(
+        select(RecoveryAttempt).where(RecoveryAttempt.decision_id == decision_id).limit(1)
+    ).scalar_one_or_none()
+
+
 def next_attempt_number(txn: Transaction) -> int:
-    return txn.retry_count + txn.outreach_count + 1
+    """Ordinal of the next attempt on this transaction.
+
+    Counted from the attempts already recorded, **not** from `retry_count` /
+    `outreach_count`. Those counters are incremented by the action itself, so
+    deriving the key from them would give a replayed event a fresh key -- and a
+    fresh charge. The number of existing attempts does not move until an
+    attempt row is actually written.
+    """
+    return len(txn.attempts) + 1
 
 
 class ActionExecutor:
@@ -91,10 +108,26 @@ class ActionExecutor:
             )
             return None
 
+        # Idempotency gate -- two layers, because there are two ways to double up.
+        #
+        # 1. The same *decision* executed twice (an event replay, a retried
+        #    request, a worker that crashed after acting but before committing).
+        #    One decision authorises exactly one action, so this is decisive.
+        existing = _attempt_for_decision(db, decision.id)
+        if existing is not None:
+            activity.emit(
+                db, transaction_id=txn.id, stage="act", level="warn",
+                message=f"Duplicate suppressed: decision {decision.id} has already been executed.",
+                detail={"attempt_id": existing.id, "status": existing.status},
+            )
+            return existing
+
         attempt_no = next_attempt_number(txn)
         key = idempotency_key(txn.id, attempt_no)
 
-        # Idempotency gate. This is the check that makes a replayed webhook safe.
+        # 2. The same attempt ordinal reached by another path. The key is also
+        #    sent to Razorpay as the payment link's `reference_id`, so the
+        #    provider rejects a duplicate even if this process races itself.
         if (existing := _existing_attempt(db, key)) is not None:
             activity.emit(
                 db, transaction_id=txn.id, stage="act", level="warn",
@@ -139,8 +172,10 @@ class ActionExecutor:
         action = Action(attempt.action)
         attempt.status = AttemptStatus.EXECUTING
         attempt.executed_at = utcnow()
-        if txn.recovery_state != RecoveryState.EXECUTING:
-            transition(txn, RecoveryState.EXECUTING)
+        # Walk the state machine rather than jumping: an attempt executed
+        # directly (a scheduled retry firing, or a replayed event) may still be
+        # sitting in DETECTED, and skipping states would break the audit trail.
+        advance_to(txn, RecoveryState.EXECUTING)
 
         try:
             result, provider_attempts = await call_with_backoff(

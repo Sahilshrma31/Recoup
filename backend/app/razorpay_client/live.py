@@ -28,7 +28,7 @@ class LiveRazorpayGateway(PaymentGateway):
         if not settings.razorpay_configured:
             raise ValueError("Razorpay key id/secret are required for the live gateway.")
         self._client = razorpay.Client(auth=(settings.razorpay_key_id, settings.razorpay_key_secret))
-        self._client.set_app_details({"title": "revenue-recovery-agent", "version": "1.0.0"})
+        self._client.set_app_details({"title": "recoup-recovery-agent", "version": "1.0.0"})
 
     async def _call(self, fn, *args, **kwargs):
         """Run the blocking SDK off the event loop and normalise its errors."""

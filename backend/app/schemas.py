@@ -5,13 +5,31 @@ Amounts cross the wire in **both** paise (integer, authoritative) and rupees
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 
 def rupees(paise: int | None) -> float:
     return round((paise or 0) / 100, 2)
+
+
+def _stamp_utc(value: datetime | None) -> datetime | None:
+    """Mark naive datetimes as UTC.
+
+    Everything is stored in UTC, but SQLite hands back naive datetimes and a
+    naive ISO string is interpreted by browsers as *local* time -- which
+    silently shifted every timestamp in the UI by the viewer's offset. Stamping
+    the zone here fixes it once, at the boundary, for every response.
+    """
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+#: Use in place of `datetime` on every response model.
+UtcDatetime = Annotated[datetime, AfterValidator(_stamp_utc)]
 
 
 class CustomerOut(BaseModel):
@@ -25,7 +43,7 @@ class CustomerOut(BaseModel):
     failed_payments: int
     lifetime_value_paise: int
     opted_out: bool
-    last_payment_at: datetime | None = None
+    last_payment_at: UtcDatetime | None = None
 
 
 class TransactionSummary(BaseModel):
@@ -43,8 +61,8 @@ class TransactionSummary(BaseModel):
     at_risk: bool
     retry_count: int
     outreach_count: int
-    failed_at: datetime | None
-    recovered_at: datetime | None
+    failed_at: UtcDatetime | None
+    recovered_at: UtcDatetime | None
     recovered_amount_paise: int
     # Latest decision, when the agent has already looked at this transaction.
     recommended_action: str | None = None
@@ -58,7 +76,7 @@ class DecisionOut(BaseModel):
 
     id: int
     transaction_id: str
-    created_at: datetime
+    created_at: UtcDatetime
     diagnosis: str
     category: str
     diagnosis_confidence: float
@@ -89,9 +107,9 @@ class AttemptOut(BaseModel):
     provider_ref: str | None
     provider_url: str | None
     error: str | None
-    scheduled_for: datetime | None
-    executed_at: datetime | None
-    completed_at: datetime | None
+    scheduled_for: UtcDatetime | None
+    executed_at: UtcDatetime | None
+    completed_at: UtcDatetime | None
 
 
 class TransactionDetail(TransactionSummary):
